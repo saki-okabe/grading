@@ -48,7 +48,7 @@ API_KEY      = _require_env("API_KEY")
 MODEL_NAME   = _require_env("MODEL_NAME")
 
 # 採点する課題名(学生フォルダ直下のサブフォルダ名と一致させる)
-TARGET_ASSIGNMENT = "事前課題1"
+TARGET_ASSIGNMENT = "リフレクションシート7"
 
 # VLM呼び出しパラメータ
 MAX_TOKENS = 8000              # 推論モデルはthinkingに大量消費するため余裕を持たせる
