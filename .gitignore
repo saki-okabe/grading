@@ -37,6 +37,9 @@ result.md
 CLAUDE.md
 student_list.csv
 .claudeignore
+result_summaries
+result_summaries_teams
+regrade_summaries
 
 calibration
 提出課題
