@@ -48,7 +48,16 @@ API_KEY      = _require_env("API_KEY")
 MODEL_NAME   = _require_env("MODEL_NAME")
 
 # 採点する課題名(学生フォルダ直下のサブフォルダ名と一致させる)
+# GRADE_ALL_ASSIGNMENTS = False のときに採点する対象。
 TARGET_ASSIGNMENT = "リフレクションシート7"
+
+# 全課題を一括採点するかどうか
+# True : assignment_config.json に登録された全課題を順に採点する（TARGET_ASSIGNMENTは無視）
+# False: TARGET_ASSIGNMENT の1課題のみ採点する
+# 用途: 前回エラーになった課題を全課題まとめて再採点したいとき、
+#       GRADE_ALL_ASSIGNMENTS=True / SKIP_ALREADY_GRADED=True / SUMMARY_REGRADED_ONLY=True の
+#       3つを有効にすると「成功はスキップ・エラーのみ再採点」が全課題で走る。
+GRADE_ALL_ASSIGNMENTS = False
 
 # VLM呼び出しパラメータ
 MAX_TOKENS = 8000              # 推論モデルはthinkingに大量消費するため余裕を持たせる
@@ -57,9 +66,17 @@ MAX_RETRY = 1                  # 打ち切られた場合のリトライ回数�
 REQUEST_TIMEOUT = 3600         # 1件あたりのタイムアウト秒数（60分）
 
 # 採点済みファイルがある学生をスキップするかどうか
-# True : 既に grading_result.json がある学生は採点しない（途中再開・大量処理向け）
+# True : 「成功済み」の学生は採点しない（途中再開・大量処理・エラー再採点向け）
+#        ※ is_already_graded がエラー付きJSONを未採点扱いにするため、
+#          エラー（採点エラー・例外エラー）の学生は True でも再採点される
 # False: 既に採点済みでも再採点する（モデル比較・採点基準の再評価向け、結果は上書き）
 SKIP_ALREADY_GRADED = False
+
+# 集計CSVに「今回実際に採点した学生の行」だけを出力するかどうか
+# True : 未提出・採点済みスキップの行はCSVに含めず、今回VLMを実行した行のみ出力
+#        （エラー再採点時に「どのエラーが解消したか」を確認しやすい）
+# False: 従来どおり全学生の行を出力する（完全な集計）
+SUMMARY_REGRADED_ONLY = False
 
 
 # 1回の実行で採点する最大人数（デバッグ・動作確認用）
@@ -157,6 +174,23 @@ def load_student_list(csv_path: Path) -> list[str]:
     return names
 
 
+def load_english_name_map(csv_path: Path) -> dict[str, str]:
+    """student_list.csvから「漢字氏名 → ローマ字氏名」の対応を読み込む。
+
+    student_list.csv は 1列目=ローマ字氏名, 2列目=漢字氏名 の想定。
+    集計CSVの氏名（漢字）から英語表記を引くために使う。
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(f"学生名簿が見つかりません: {csv_path}")
+    mapping: dict[str, str] = {}
+    with csv_path.open(encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 2 and row[1].strip():
+                mapping[row[1].strip()] = row[0].strip()
+    return mapping
+
+
 # ============================================================
 # ディレクトリ走査
 # ============================================================
@@ -207,7 +241,8 @@ def collect_students(target: str) -> list[dict]:
     Returns:
         [
             {
-                "name": "氏名",
+                "name": "氏名",                 # 漢字氏名
+                "english_name": "英語名",       # ローマ字氏名（名簿に無ければ空文字）
                 "assignment_dir": Path,         # 結果保存先
                 "submission": Path or None,     # 採点対象ファイル
             },
@@ -218,6 +253,7 @@ def collect_students(target: str) -> list[dict]:
         raise FileNotFoundError(f"提出物フォルダが存在しません: {SUBMITTED_DIR}")
 
     student_names = load_student_list(STUDENT_LIST_PATH)
+    english_map = load_english_name_map(STUDENT_LIST_PATH)
 
     # 提出フォルダ名を辞書化（高速照合用）
     existing_dirs = {d.name: d for d in SUBMITTED_DIR.iterdir() if d.is_dir()}
@@ -232,6 +268,7 @@ def collect_students(target: str) -> list[dict]:
         submission = find_latest_submission(assignment_dir)
         students.append({
             "name": name,
+            "english_name": english_map.get(name, ""),
             "assignment_dir": assignment_dir,
             "submission": submission,
         })
@@ -433,14 +470,15 @@ def grade_image(client: OpenAI, image: Image.Image, prompt: str) -> dict:
 # 採点結果の保存
 # ============================================================
 def save_result_files(assignment_dir: Path, student_name: str,
-                      submission_path: Path, result: dict):
+                      submission_path: Path, result: dict,
+                      assignment_name: str):
     """各学生の課題フォルダ内に JSON と Markdown を保存。"""
     assignment_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- JSON（機械可読） ----
     json_data = {
         "学生": student_name,
-        "課題": TARGET_ASSIGNMENT,
+        "課題": assignment_name,
         "提出ファイル": submission_path.name,
         "採点日時": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "モデル": MODEL_NAME,
@@ -454,7 +492,7 @@ def save_result_files(assignment_dir: Path, student_name: str,
     md_lines = [
         f"# 採点結果: {student_name}",
         "",
-        f"- **課題**: {TARGET_ASSIGNMENT}",
+        f"- **課題**: {assignment_name}",
         f"- **提出ファイル**: {submission_path.name}",
         f"- **採点日時**: {json_data['採点日時']}",
         f"- **モデル**: {MODEL_NAME}",
@@ -490,48 +528,60 @@ def save_result_files(assignment_dir: Path, student_name: str,
 
 
 def is_already_graded(assignment_dir: Path) -> bool:
-    """採点済みかどうかを判定（JSONがあるかで判断）。"""
-    return (assignment_dir / RESULT_JSON_NAME).exists()
+    """採点済みかどうかを判定する。
+
+    grading_result.json が存在し、かつ採点結果にエラーが無い場合のみ
+    「採点済み」とみなす。エラー付きJSON（採点エラー）や、壊れて読めない
+    JSONは未採点扱いとし、SKIP_ALREADY_GRADED=True でも再採点対象にする。
+    （例外エラーはそもそもJSONが残らないため、ここではFalse=未採点になる）
+    """
+    json_path = assignment_dir / RESULT_JSON_NAME
+    if not json_path.exists():
+        return False
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False  # 壊れて読めないJSONは再採点対象
+    result = data.get("採点結果", {})
+    return isinstance(result, dict) and "error" not in result
 
 
 # ============================================================
 # メイン処理
 # ============================================================
-def main():
-    print(f"=" * 70)
-    print(f"DEBUG: MODEL_NAME = {MODEL_NAME}") 
-    print(f"DEBUG: API_BASE_URL = {API_BASE_URL}") 
-    print(f"採点対象課題: {TARGET_ASSIGNMENT}")
-    print(f"=" * 70)
-    print(f"採点対象課題: {TARGET_ASSIGNMENT}")
-    print(f"採点済みスキップ: {'ON（既存の採点はスキップ）' if SKIP_ALREADY_GRADED else 'OFF（全員を再採点・上書き）'}")
-    if GRADE_LIMIT is not None:
-        print(f"採点上限: {GRADE_LIMIT}件（デバッグモード）")
-    else:
-        print(f"採点上限: なし（全員採点）")
-    print(f"=" * 70)
+SUMMARY_FIELDNAMES = ["課題名", "氏名", "英語名", "状態", "提出ファイル", "点数", "評価理由", "フィードバック"]
 
-    # 採点基準を読み込み
+
+def grade_one_assignment(client: OpenAI, assignment_name: str,
+                         stats: dict) -> bool:
+    """1課題分の採点を実行し、課題ごとの集計CSVを出力する。
+
+    stats は複数課題にまたがる集計カウンタ（呼び出し側で共有・加算される）。
+    GRADE_LIMIT に達して処理全体を打ち切るべき場合は True を返す。
+    """
+    print("=" * 70)
+    print(f"■ 課題: {assignment_name}")
+    print("=" * 70)
+
+    # 採点基準を読み込み（無い課題はスキップして次へ）
     try:
-        criteria = load_criteria(TARGET_ASSIGNMENT)
+        criteria = load_criteria(assignment_name)
     except FileNotFoundError as e:
-        print(f"\n❌ {e}")
-        return
+        print(f"⚠ 採点基準が見つからないためこの課題をスキップします: {e}\n")
+        return False
     prompt = build_prompt(criteria)
-    print(f"\n採点基準を読み込みました ({len(criteria)} 文字)\n")
+    print(f"採点基準を読み込みました ({len(criteria)} 文字)")
 
     # 学生一覧を取得
-    students = collect_students(TARGET_ASSIGNMENT)
+    students = collect_students(assignment_name)
     print(f"学生数: {len(students)}\n")
 
-    # 集計用カウンタ
-    stats = {"graded": 0, "skipped": 0, "no_submission": 0, "error": 0}
     summary_rows = []
-
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY, timeout=REQUEST_TIMEOUT)
+    limit_reached = False
 
     for i, s in enumerate(students, 1):
         name = s["name"]
+        english_name = s["english_name"]
         assignment_dir = s["assignment_dir"]
         submission = s["submission"]
         print(f"[{i}/{len(students)}] {name}")
@@ -540,55 +590,63 @@ def main():
         if submission is None:
             print(f"  → 提出なし\n")
             stats["no_submission"] += 1
-            summary_rows.append({
-                "氏名": name,
-                "状態": "未提出",
-                "提出ファイル": "",
-                "点数": 0,
-                "評価理由": "",
-                "フィードバック": "",
-            })
+            if not SUMMARY_REGRADED_ONLY:
+                summary_rows.append({
+                    "課題名": assignment_name,
+                    "氏名": name,
+                    "英語名": english_name,
+                    "状態": "未提出",
+                    "提出ファイル": "",
+                    "点数": 0,
+                    "評価理由": "",
+                    "フィードバック": "",
+                })
             continue
 
         # ---- 採点済みスキップ ----
         if SKIP_ALREADY_GRADED and is_already_graded(assignment_dir):
             print(f"  → 採点済み（スキップ）\n")
             stats["skipped"] += 1
-            # 既存結果を集計に含める
-            try:
-                existing = json.loads((assignment_dir / RESULT_JSON_NAME).read_text(encoding="utf-8"))
-                r = existing.get("採点結果", {})
-                summary_rows.append({
-                    "氏名": name,
-                    "状態": "採点済み（前回分）",
-                    "提出ファイル": existing.get("提出ファイル", submission.name),
-                    "点数": r.get("点数", ""),
-                    "評価理由": r.get("評価理由", ""),
-                    "フィードバック": r.get("フィードバック", ""),
-                })
-            except Exception:
-                summary_rows.append({
-                    "氏名": name, "状態": "採点済み（読込失敗）",
-                    "提出ファイル": submission.name, "点数": "", "評価理由": "", "フィードバック": "",
-                })
+            if not SUMMARY_REGRADED_ONLY:
+                # 既存結果を集計に含める
+                try:
+                    existing = json.loads((assignment_dir / RESULT_JSON_NAME).read_text(encoding="utf-8"))
+                    r = existing.get("採点結果", {})
+                    summary_rows.append({
+                        "課題名": assignment_name,
+                        "氏名": name,
+                        "英語名": english_name,
+                        "状態": "採点済み（前回分）",
+                        "提出ファイル": existing.get("提出ファイル", submission.name),
+                        "点数": r.get("点数", ""),
+                        "評価理由": r.get("評価理由", ""),
+                        "フィードバック": r.get("フィードバック", ""),
+                    })
+                except Exception:
+                    summary_rows.append({
+                        "課題名": assignment_name,
+                        "氏名": name, "英語名": english_name, "状態": "採点済み（読込失敗）",
+                        "提出ファイル": submission.name, "点数": "", "評価理由": "", "フィードバック": "",
+                    })
             continue
 
         # ---- 採点実行 ----
         try:
             print(f"  ファイル: {submission.name}")
-            images = load_images(submission, TARGET_ASSIGNMENT)
+            images = load_images(submission, assignment_name)
             print(f"  ページ数: {len(images)}")
             target_image = merge_images_vertically(images)
             print(f"  VLMで採点中...")
             result = grade_image(client, target_image, prompt)
 
-            save_result_files(assignment_dir, name, submission, result)
+            save_result_files(assignment_dir, name, submission, result, assignment_name)
 
             if "error" in result:
                 print(f"  → 採点エラー: {result['error']}\n")
                 stats["error"] += 1
                 summary_rows.append({
-                    "氏名": name, "状態": "採点エラー",
+                    "課題名": assignment_name,
+                    "氏名": name, "英語名": english_name, "状態": "採点エラー",
                     "提出ファイル": submission.name,
                     "点数": "", "評価理由": result["error"], "フィードバック": "",
                 })
@@ -597,7 +655,8 @@ def main():
                 print(f"  → 点数: {score}点\n")
                 stats["graded"] += 1
                 summary_rows.append({
-                    "氏名": name, "状態": "採点完了",
+                    "課題名": assignment_name,
+                    "氏名": name, "英語名": english_name, "状態": "採点完了",
                     "提出ファイル": submission.name,
                     "点数": score,
                     "評価理由": result.get("評価理由", ""),
@@ -608,7 +667,8 @@ def main():
             print(f"  → 例外: {e}\n")
             stats["error"] += 1
             summary_rows.append({
-                "氏名": name, "状態": "例外エラー",
+                "課題名": assignment_name,
+                "氏名": name, "英語名": english_name, "状態": "例外エラー",
                 "提出ファイル": submission.name if submission else "",
                 "点数": "", "評価理由": str(e), "フィードバック": "",
             })
@@ -616,29 +676,70 @@ def main():
         # ---- 採点上限チェック（デバッグ用） ----
         # ここに来る = 実際にVLM呼び出しを試みた（成功・エラー問わず）
         # 「未提出」「採点済みスキップ」は上の continue で飛ばされているのでカウントされない
+        # GRADE_LIMIT は複数課題にまたがる合計試行数で判定する
         attempts = stats["graded"] + stats["error"]
         if GRADE_LIMIT is not None and attempts >= GRADE_LIMIT:
             print(f"⚠ GRADE_LIMIT ({GRADE_LIMIT}件) に達したため処理を打ち切ります\n")
+            limit_reached = True
             break
 
-    # ---- 全体集計CSVを保存 ----
+    # ---- 課題ごとの集計CSVを保存 ----
+    if not summary_rows:
+        print(f"（課題「{assignment_name}」: 出力対象の行がないためCSVは作成しません）\n")
+        return limit_reached
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_name = TARGET_ASSIGNMENT.replace("/", "_").replace(" ", "_")
+    safe_name = assignment_name.replace("/", "_").replace(" ", "_")
     summary_csv = SUMMARY_DIR / f"summary_{safe_name}_{timestamp}.csv"
     with open(summary_csv, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=["氏名", "状態", "提出ファイル", "点数", "評価理由", "フィードバック"])
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDNAMES)
         writer.writeheader()
         writer.writerows(summary_rows)
+    print(f"集計CSV: {summary_csv}\n")
+
+    return limit_reached
+
+
+def main():
+    # 採点対象の課題リストを決定
+    if GRADE_ALL_ASSIGNMENTS:
+        assignments = list(ASSIGNMENT_CONFIG.keys())
+    else:
+        assignments = [TARGET_ASSIGNMENT]
+
+    print(f"=" * 70)
+    print(f"DEBUG: MODEL_NAME = {MODEL_NAME}")
+    print(f"DEBUG: API_BASE_URL = {API_BASE_URL}")
+    if GRADE_ALL_ASSIGNMENTS:
+        print(f"採点対象課題: 全{len(assignments)}課題（GRADE_ALL_ASSIGNMENTS=ON）")
+    else:
+        print(f"採点対象課題: {TARGET_ASSIGNMENT}")
+    print(f"採点済みスキップ: {'ON（成功済みはスキップ・エラーは再採点）' if SKIP_ALREADY_GRADED else 'OFF（全員を再採点・上書き）'}")
+    print(f"集計CSV: {'今回採点した行のみ' if SUMMARY_REGRADED_ONLY else '全学生の行'}")
+    if GRADE_LIMIT is not None:
+        print(f"採点上限: {GRADE_LIMIT}件（デバッグモード・全課題合計）")
+    else:
+        print(f"採点上限: なし（全員採点）")
+    print(f"=" * 70)
+
+    # 集計用カウンタ（全課題で共有）
+    stats = {"graded": 0, "skipped": 0, "no_submission": 0, "error": 0}
+
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY, timeout=REQUEST_TIMEOUT)
+
+    for assignment_name in assignments:
+        limit_reached = grade_one_assignment(client, assignment_name, stats)
+        if limit_reached:
+            break
 
     # ---- サマリ表示 ----
     print("=" * 70)
-    print("処理結果")
+    print("処理結果（全課題合計）")
     print("=" * 70)
     print(f"  採点完了: {stats['graded']} 件")
     print(f"  採点済みスキップ: {stats['skipped']} 件")
     print(f"  未提出: {stats['no_submission']} 件")
     print(f"  エラー: {stats['error']} 件")
-    print(f"\n全体集計CSV: {summary_csv}")
 
 
 if __name__ == "__main__":
