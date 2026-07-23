@@ -22,7 +22,7 @@ Teams（Web）の採点欄に、Teams採点用CSVの点数を自動入力する�
     3. 問題なければ DRY_RUN = False にして本番入力する。
 
 想定するHTML:
-    点数欄:   <input data-test="points-input" aria-label="AIBA, Rino の 9 点中の成績" ...>
+    点数欄:   <input data-test="points-input" aria-label="YAMADA, Taro の 9 点中の成績" ...>
     課題名:   <h1 data-test="assignment-title">リフレクションシート7</h1>
 """
 import csv
@@ -63,10 +63,11 @@ FORCE_ASSIGNMENT = False  # True: 課題名が一致しなくても中断せず�
 # 自動照合（完全一致・順序ゆれ）で拾えない学生を、明示的にCSVの英語名へ結びつける。
 #   キー: Teams側の氏名（aria-labelの名前部分。カンマ・全角半角・大文字小文字は無視して照合）
 #   値  : CSVの「英語名」列の値（そのまま）
-# 例: Teamsで "ISHIZKA, Rinka"（U抜け）→ CSVの "ISHIZUKA Rinka" に対応させる。
+# 例: Teamsで "SUZKI, Hanako"（U抜け）→ CSVの "SUZUKI Hanako" に対応させる。
 # ※同じ学生は全課題で同じ綴りになるため、一度書けば全課題で有効。
+# 自分の授業の学生名に合わせて記入する（不要なら空 {} のままでよい）。
 NAME_OVERRIDES = {
-    "ISHIZKA, Rinka": "ISHIZUKA Rinka",
+    # "SUZKI, Hanako": "SUZUKI Hanako",
 }
 
 # 入力後に次の学生の欄へ移動するキー（↓で移動できることを確認済み）
@@ -84,7 +85,7 @@ STEP_WAIT_MS = 250
 MAX_ROWS = 1000
 
 # aria-label から「氏名」と「満点」を取り出す正規表現
-#   例: "AIBA, Rino の 9 点中の成績" → name="AIBA, Rino", max="9"
+#   例: "YAMADA, Taro の 9 点中の成績" → name="YAMADA, Taro", max="9"
 ARIA_LABEL_RE = re.compile(r"^(?P<name>.+?)\s*の\s*(?P<max>\d+)\s*点中")
 
 
@@ -95,7 +96,7 @@ def normalize_name(name: str) -> str:
     """氏名照合用に正規化する。
 
     - NFKCで全角/半角を統一
-    - カンマ・ピリオドを空白に置換（"AIBA, Rino" → "AIBA Rino"）
+    - カンマ・ピリオドを空白に置換（"YAMADA, Taro" → "YAMADA Taro"）
     - 連続空白を1つにまとめ、前後空白を除去
     - 大文字小文字を無視（casefold）
     """
@@ -108,8 +109,8 @@ def normalize_name(name: str) -> str:
 def token_key(name: str) -> tuple[str, ...]:
     """氏名を語の集合（順序無視）に正規化する。
 
-    姓名の順序が逆に登録されている学生（例: CSV "ARAI Daisuke" に対し
-    Teams側が "DAISUKE, Arai"）を、完全一致が外れたときのフォールバックで
+    姓名の順序が逆に登録されている学生（例: CSV "YAMADA Taro" に対し
+    Teams側が "TARO, Yamada"）を、完全一致が外れたときのフォールバックで
     拾うために使う。
     """
     return tuple(sorted(normalize_name(name).split()))
