@@ -1,7 +1,7 @@
 # ===== 秘密情報 =====
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # ===== 個人情報を含むファイル =====
 # 提出物(万が一ローカルコピーがあった場合)
@@ -43,3 +43,9 @@ regrade_summaries
 
 calibration
 提出課題
+
+# ローカルデータはこの配下にまとめる（任意の出力先も要確認）
+local_data/
+.coverage
+htmlcov/
+.pytest_cache/

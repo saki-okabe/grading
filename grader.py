@@ -31,8 +31,6 @@ from dotenv import load_dotenv
 # ============================================================
 # 設定
 # ============================================================
-load_dotenv(override=True)  # .envファイルから環境変数を読み込む
-
 def _require_env(key: str) -> str:
     """必須の環境変数を取得。未設定なら明確なエラーで停止する。"""
     value = os.getenv(key)
@@ -43,9 +41,11 @@ def _require_env(key: str) -> str:
         )
     return value
 
-API_BASE_URL = _require_env("API_BASE_URL")
-API_KEY      = _require_env("API_KEY")
-MODEL_NAME   = _require_env("MODEL_NAME")
+# 読み込みだけでは秘密情報の取得・設定ファイル読込・出力を行わない。
+# 実行時に configure_runtime() が設定する。
+API_BASE_URL = ""
+API_KEY = ""
+MODEL_NAME = ""
 
 # 採点する課題名(学生フォルダ直下のサブフォルダ名と一致させる)
 # GRADE_ALL_ASSIGNMENTS = False のときに採点する対象。
@@ -90,7 +90,6 @@ GRADE_LIMIT = None
 SUBMITTED_DIR  = Path(os.getenv("SUBMITTED_DIR", "./Submitted files"))
 CRITERIA_DIR = Path("./grading_criteria")           # 採点基準のルート
 SUMMARY_DIR = Path(os.getenv("SUMMARY_DIR", "./grading_summary"))  # 全体集計の保存先
-SUMMARY_DIR.mkdir(exist_ok=True)
 
 # 学生名簿CSV（1列目: ローマ字氏名, 2列目: 漢字氏名）
 STUDENT_LIST_PATH = Path(os.getenv("STUDENT_LIST_PATH", "./student_list.csv"))
@@ -115,7 +114,47 @@ def _load_assignment_config() -> dict[str, str]:
     with ASSIGNMENT_CONFIG_PATH.open(encoding="utf-8") as f:
         return json.load(f)
 
-ASSIGNMENT_CONFIG = _load_assignment_config()
+ASSIGNMENT_CONFIG: dict[str, str] = {}
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError(f"{key} は true または false を指定してください")
+
+
+def configure_runtime() -> None:
+    """実行時だけ .env と課題設定を読み込む。既存定数を既定値として維持する。"""
+    global API_BASE_URL, API_KEY, MODEL_NAME, TARGET_ASSIGNMENT
+    global GRADE_ALL_ASSIGNMENTS, SKIP_ALREADY_GRADED, SUMMARY_REGRADED_ONLY
+    global GRADE_LIMIT, SUBMITTED_DIR, STUDENT_LIST_PATH, SUMMARY_DIR, ASSIGNMENT_CONFIG
+
+    load_dotenv(override=True)
+    API_BASE_URL = _require_env("API_BASE_URL")
+    API_KEY = _require_env("API_KEY")
+    MODEL_NAME = _require_env("MODEL_NAME")
+    TARGET_ASSIGNMENT = os.getenv("TARGET_ASSIGNMENT", TARGET_ASSIGNMENT)
+    GRADE_ALL_ASSIGNMENTS = _env_bool("GRADE_ALL_ASSIGNMENTS", GRADE_ALL_ASSIGNMENTS)
+    SKIP_ALREADY_GRADED = _env_bool("SKIP_ALREADY_GRADED", SKIP_ALREADY_GRADED)
+    SUMMARY_REGRADED_ONLY = _env_bool("SUMMARY_REGRADED_ONLY", SUMMARY_REGRADED_ONLY)
+    raw_limit = os.getenv("GRADE_LIMIT")
+    if raw_limit is not None:
+        if raw_limit.strip().lower() in {"", "none"}:
+            GRADE_LIMIT = None
+        else:
+            GRADE_LIMIT = int(raw_limit)
+            if GRADE_LIMIT < 1:
+                raise ValueError("GRADE_LIMIT は正の整数または none を指定してください")
+    SUBMITTED_DIR = Path(os.getenv("SUBMITTED_DIR", str(SUBMITTED_DIR)))
+    STUDENT_LIST_PATH = Path(os.getenv("STUDENT_LIST_PATH", str(STUDENT_LIST_PATH)))
+    SUMMARY_DIR = Path(os.getenv("SUMMARY_DIR", str(SUMMARY_DIR)))
+    ASSIGNMENT_CONFIG = _load_assignment_config()
 
 
 # ============================================================
@@ -701,6 +740,8 @@ def grade_one_assignment(client: OpenAI, assignment_name: str,
 
 
 def main():
+    configure_runtime()
+    SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
     # 採点対象の課題リストを決定
     if GRADE_ALL_ASSIGNMENTS:
         assignments = list(ASSIGNMENT_CONFIG.keys())

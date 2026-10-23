@@ -44,13 +44,17 @@ Submitted files/
 
 ### 学生名簿 `student_list.csv`
 - 1列目: ローマ字氏名、2列目: 漢字氏名。
-- 集計CSVの `英語名` 列を、フォルダ名（漢字氏名）から引くために使う。名簿が無くても採点自体は動くが `英語名` は空になる。
+- 名簿は必須。名簿の順に処理し、集計CSVの `英語名` 列を漢字氏名から引く。
+- 名簿にあっても学生フォルダ自体が無い場合は集計から除外する。学生フォルダがあり、対象課題が無い／空の場合は「未提出」とする。
 
 ## クイックスタート（最小手順）
 
 ```bash
-# 1. 依存インストール
-pip install openai pillow pdf2image python-dotenv
+# 1. Python 3.10以上で仮想環境を作り、依存をインストール
+python -m venv .venv
+# Windows PowerShell: .\.venv\Scripts\Activate.ps1
+# macOS / Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt
 #   PDFを扱うため poppler も必要:
 #   Mac: brew install poppler   /   Windows: poppler を別途インストール
 
@@ -59,12 +63,16 @@ cp .env.example .env
 
 # 3. VLM の APIサーバーを起動（LM Studio / vLLM など。画像入力対応モデルを選ぶ）
 
-# 4. grader.py 冒頭の TARGET_ASSIGNMENT を採点したい課題名にする
+# 4. .env の TARGET_ASSIGNMENT を採点したい課題名にする
 #    grading_criteria/<課題名>.md を用意し、assignment_config.json に用紙向きを登録
 
-# 5. 実行（まずは GRADE_LIMIT = 3 などで小さく試す）
+# 5. 名簿と提出物を用意して実行（まずは .env で GRADE_LIMIT=3 にする）
 python grader.py
 ```
+
+実行はリポジトリのルートから行う。PowerShellでは `.env` のコピーに
+`Copy-Item .env.example .env` を使用できる。
+共同開発の手順・構成・改善方針は [CONTRIBUTING.md](CONTRIBUTING.md) を参照。
 
 ## `.env` の設定
 
@@ -78,6 +86,15 @@ python grader.py
 | `SUBMITTED_DIR` | 提出物ルート。省略時 `./Submitted files` |
 | `STUDENT_LIST_PATH` | 名簿CSVのパス。省略時 `./student_list.csv` |
 | `SUMMARY_DIR` | 集計CSVの出力先。省略時 `./grading_summary` |
+| `TARGET_ASSIGNMENT` | 採点対象課題。省略時は既存定数の値 |
+| `GRADE_ALL_ASSIGNMENTS` | 全課題を採点。`true` / `false` |
+| `SKIP_ALREADY_GRADED` | 成功済みをスキップ。`true` / `false` |
+| `SUMMARY_REGRADED_ONLY` | 今回採点した行だけ集計。`true` / `false` |
+| `GRADE_LIMIT` | 全課題を通じた試行数の上限。正の整数、`none` または空で無制限 |
+
+実行モードは環境変数を優先し、省略時は従来の定数を使う。
+既存仕様どおり `.env` が同名のシェル環境変数より優先される。
+個人の設定変更は `.env` で行い、本体の編集競合を避ける。
 
 ## 採点する課題の指定
 
@@ -90,7 +107,7 @@ python grader.py
        "リフレクションシート1": "portrait"
    }
    ```
-3. `grader.py` 冒頭の `TARGET_ASSIGNMENT` をその課題名にする。
+3. `.env` の `TARGET_ASSIGNMENT` をその課題名にする。
 
 ## `grader.py` の主な設定定数（冒頭）
 
@@ -120,15 +137,19 @@ python grader.py
 ## 課題が変わったら
 1. `grading_criteria/<新しい課題名>.md` を作成
 2. `assignment_config.json` に課題名と用紙向きを追加
-3. `grader.py` の `TARGET_ASSIGNMENT` を新しい課題名に変更
+3. `.env` の `TARGET_ASSIGNMENT` を新しい課題名に変更
 4. 実行
 
 ## ディレクトリ構成
 
 ```
-work_grading/
+grading/
 ├── grader.py                   # メインスクリプト（コア）
-├── test_single.py              # 動作確認用（1ファイル試す）
+├── tests/                      # 外部通信・学生情報を使わない回帰テスト
+├── requirements.txt            # コアの依存
+├── requirements-teams.txt      # Teams連携も含む依存
+├── CONTRIBUTING.md             # 共同開発手順・改善方針
+├── .github/                    # CI・PRテンプレート
 ├── assignment_config.json      # 課題ごとの用紙向き設定
 ├── student_list.csv            # 学生名簿（git管理外・個人情報）
 ├── .env                        # API設定（git管理外・秘密情報）
@@ -137,19 +158,20 @@ work_grading/
 ├── Submitted files/            # 提出物（git管理外・個人情報）
 ├── grading_summary/            # 全体集計CSV出力先（自動生成・git管理外・個人情報）
 ├── add_teams_columns.py        # ↓この授業固有（任意）
-└── teams_autofill.py           # ↓この授業固有（任意）
+├── teams_autofill.py           # ↓この授業固有（任意）
+└── teams_download.py           # Teamsの画面からPDFを取得（任意）
 ```
 
 ---
 
 # 応用: 全課題の一括採点・エラーのみ再採点
 
-`grader.py` 冒頭の3定数を組み合わせると、「成功はスキップ・エラーのみ全課題まとめて再採点」ができる。
+`.env` の3設定を組み合わせると、「成功はスキップ・エラーのみ全課題まとめて再採点」ができる。
 
-```python
-GRADE_ALL_ASSIGNMENTS = True   # 全課題を順に処理
-SKIP_ALREADY_GRADED   = True   # 成功済みはスキップ、エラーのみ再採点
-SUMMARY_REGRADED_ONLY = True   # 集計CSVは今回採点した行のみ
+```dotenv
+GRADE_ALL_ASSIGNMENTS=true
+SKIP_ALREADY_GRADED=true
+SUMMARY_REGRADED_ONLY=true
 ```
 
 再採点の集計を既存の結果と混ぜたくない場合は、`.env` の `SUMMARY_DIR` を空の専用フォルダに向ける（例 `SUMMARY_DIR=./regrade_summaries`）。エラーがあった課題だけ `summary_<課題名>_<日時>.csv` が1課題1ファイルで出力される。終わったら設定を元に戻す。
@@ -187,7 +209,7 @@ Teams採点用CSVを読み、成績ページの各入力欄に点数を自動入
 2. そのChromeでTeamsにログインし、対象課題の「成績」ページを開く。
 3. Playwrightを導入（CDP接続のみなので `playwright install` は不要）:
    ```
-   pip install playwright
+   python -m pip install -r requirements-teams.txt
    ```
 
 ### 実行（半自動バッチモード / 多数の課題向け・推奨）
